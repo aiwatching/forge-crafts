@@ -1,8 +1,8 @@
 name: mock-server-manager
 displayName: Mock Server
 description: Start, stop, and manage the FortiNAC mock-server and its data stores
-version: 0.1.0
-icon: "🧪"
+version: 0.2.0
+icon: 🧪
 ui:
   tab: ui.tsx
 server:

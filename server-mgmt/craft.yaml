@@ -1,8 +1,9 @@
 name: server-mgmt
 displayName: 🐳 server management
-description: Start/stop FortiNAC web-server + dependencies via build-tools docker compose and the bare-metal start-web-server.sh launcher.
-version: 0.1.0
-icon: "🐳"
+description: Start/stop FortiNAC web-server + dependencies via build-tools
+  docker compose and the bare-metal start-web-server.sh launcher.
+version: 0.2.0
+icon: 🐳
 ui:
   tab: ui.tsx
 server:

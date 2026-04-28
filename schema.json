@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Forge Crafts Registry",
+  "type": "object",
+  "required": ["version", "crafts"],
+  "properties": {
+    "version": { "const": 1 },
+    "crafts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "displayName", "version", "files"],
+        "properties": {
+          "name":        { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,40}$" },
+          "displayName": { "type": "string" },
+          "description": { "type": "string" },
+          "version":     { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+          "author":      { "type": "string" },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "requires": {
+            "type": "object",
+            "properties": {
+              "hasFile": { "type": "array", "items": { "type": "string" } },
+              "hasGlob": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "files": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          },
+          "sourceUrl": { "type": "string", "format": "uri" }
+        }
+      }
+    }
+  }
+}

@@ -41,8 +41,8 @@
       "version": "0.2.0",
       "files": [
         "craft.yaml",
-        "ui.tsx",
-        "server.ts"
+        "server.ts",
+        "ui.tsx"
       ]
     },
     {

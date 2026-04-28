@@ -1,5 +1,17 @@
 {
   "$schema": "https://raw.githubusercontent.com/aiwatching/forge-crafts/main/schema.json",
   "version": 1,
-  "crafts": []
+  "crafts": [
+    {
+      "name": "mock-server-manager",
+      "displayName": "Mock Server",
+      "description": "Start, stop, and manage the FortiNAC mock-server and its data stores",
+      "version": "0.1.0",
+      "files": [
+        "craft.yaml",
+        "ui.tsx",
+        "server.ts"
+      ]
+    }
+  ]
 }

@@ -12,6 +12,18 @@
         "ui.tsx",
         "server.ts"
       ]
+    },
+    {
+      "name": "server-mgmt",
+      "displayName": "🐳 server management",
+      "description": "Start/stop FortiNAC web-server + dependencies via build-tools docker compose and the bare-metal start-web-server.sh launcher.",
+      "version": "0.1.0",
+      "files": [
+        "craft.yaml",
+        "ui.tsx",
+        "server.ts",
+        "README.md"
+      ]
     }
   ]
 }

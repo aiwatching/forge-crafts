@@ -21,6 +21,8 @@ export interface Endpoint {
   summary?: string;
   hasResponseSchema?: boolean;
   docFile?: string;
+  legacyJavaPath?: string;
+  newJavaPath?: string;
 }
 
 export interface RunResult {

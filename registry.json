@@ -6,7 +6,7 @@
       "name": "migration",
       "displayName": "🚚 Migration",
       "description": "API parity testing during legacy → new module migration. OpenAPI-driven discovery, batch run, schema-shape diff, AI-fix dispatch, deviation flags.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "author": "aion0",
       "tags": [
         "migration",
@@ -19,7 +19,8 @@
           "docs/fnac-rest-schema-7.6.json",
           "docs/openapi.json",
           "openapi.yaml"
-        ]
+        ],
+        "hasGlob": []
       },
       "files": [
         "README.md",

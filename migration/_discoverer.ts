@@ -52,6 +52,129 @@ const TARGET_LINE_RE = /^>\s*Target:\s*`([^`]+\.java)`/m;
 const LEGACY_JAVA_ROOTS = ['masterloader/service/src/main/java'];
 const NEW_JAVA_ROOTS = ['fnac-access/web-server/src/main/java'];
 
+interface UrlIndex {
+  exact: Map<string, string>;          // "GET /a/b" -> relPath
+  patterns: { re: RegExp; file: string }[]; // for {id} placeholders
+}
+
+const HTTP_VERBS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
+
+function urlPatternToRegex(pattern: string): RegExp {
+  // Replace {id}, {name:regex}, :id with .+; escape regex chars otherwise
+  const escaped = pattern
+    .replace(/\{[^}]+\}/g, '___PH___')
+    .replace(/:[A-Za-z_][A-Za-z0-9_]*/g, '___PH___')
+    .replace(/[.+*?^$()|[\]\\]/g, '\\$&')
+    .replace(/___PH___/g, '[^/]+');
+  return new RegExp(`^[A-Z]+ ${escaped}$`);
+}
+
+function joinUrl(prefix: string, suffix: string): string {
+  if (!suffix) return prefix || '/';
+  if (!prefix) return suffix.startsWith('/') ? suffix : `/${suffix}`;
+  const a = prefix.replace(/\/$/, '');
+  const b = suffix.startsWith('/') ? suffix : `/${suffix}`;
+  return `${a}${b}` || '/';
+}
+
+function extractAnnotationValue(anno: string, attr?: string): string | undefined {
+  // @Path("/x"), @RequestMapping("/x"), @GetMapping("/x"),
+  // @RequestMapping(value = "/x", method = ...), @PostMapping(path = "/x")
+  if (!attr) {
+    const m = anno.match(/^\s*\(\s*"([^"]*)"\s*\)/) || anno.match(/^\s*\(\s*\{?\s*"([^"]*)"/);
+    if (m) return m[1];
+  }
+  const re = new RegExp(`${attr || 'value'}\\s*=\\s*"([^"]*)"`);
+  const m = anno.match(re);
+  return m?.[1];
+}
+
+function buildUrlIndex(projectPath: string, roots: string[]): UrlIndex {
+  const index: UrlIndex = { exact: new Map(), patterns: [] };
+  for (const rel of roots) {
+    const root = join(projectPath, rel);
+    if (!existsSync(root) || !statSync(root).isDirectory()) continue;
+    const stack = [root];
+    while (stack.length) {
+      const dir = stack.pop()!;
+      let entries: string[] = [];
+      try { entries = readdirSync(dir); } catch { continue; }
+      for (const entry of entries) {
+        const full = join(dir, entry);
+        let st;
+        try { st = statSync(full); } catch { continue; }
+        if (st.isDirectory()) { stack.push(full); continue; }
+        if (!entry.endsWith('.java')) continue;
+        let src = '';
+        try { src = readFileSync(full, 'utf8'); } catch { continue; }
+        if (!/@(Path|RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|GET|POST|PUT|DELETE|PATCH)\b/.test(src)) continue;
+
+        const fileRel = full.slice(projectPath.length + 1);
+        // Class-level prefix
+        const classBlock = src.split(/\bclass\s+\w+/)[0] || '';
+        const classPath =
+          extractAnnotationValue(classBlock.match(/@RequestMapping([\s\S]*?\))/)?.[1] || '') ||
+          extractAnnotationValue(classBlock.match(/@Path([\s\S]*?\))/)?.[1] || '') || '';
+
+        // Method-level routes
+        const lines = src.split('\n');
+        let pendingPath: string | undefined;
+        let pendingVerb: string | undefined;
+        let inClassBody = false;
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (!inClassBody) {
+            if (/\bclass\s+\w+/.test(line)) inClassBody = true;
+            continue;
+          }
+          // JAX-RS style: @GET / @POST / ... preceding @Path
+          const verbM = line.match(/@(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/);
+          if (verbM) pendingVerb = verbM[1];
+          const pathM = line.match(/@Path\(\s*"([^"]*)"\s*\)/);
+          if (pathM) pendingPath = pathM[1];
+
+          // Spring style: @GetMapping("/x"), @RequestMapping(value="/x", method=GET)
+          const sm = line.match(/@(Get|Post|Put|Delete|Patch)Mapping\b([\s\S]*?\))/);
+          if (sm) {
+            const verb = sm[1].toUpperCase();
+            const val = extractAnnotationValue(sm[2]) || extractAnnotationValue(sm[2], 'path') || '';
+            const fullPath = joinUrl(classPath, val);
+            recordRoute(index, verb, fullPath, fileRel);
+          }
+          const rm = line.match(/@RequestMapping\b([\s\S]*?\))/);
+          if (rm) {
+            const args = rm[1];
+            const val = extractAnnotationValue(args) || extractAnnotationValue(args, 'path') || '';
+            const methods = [...args.matchAll(/RequestMethod\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)/g)].map(m => m[1]);
+            const fullPath = joinUrl(classPath, val);
+            if (methods.length === 0) {
+              for (const v of HTTP_VERBS) recordRoute(index, v, fullPath, fileRel);
+            } else {
+              for (const v of methods) recordRoute(index, v, fullPath, fileRel);
+            }
+          }
+          // JAX-RS: when method declaration appears, flush pending verb+path
+          if (/^\s*(public|private|protected)\b/.test(line) && pendingVerb) {
+            const fullPath = joinUrl(classPath, pendingPath || '');
+            recordRoute(index, pendingVerb, fullPath, fileRel);
+            pendingVerb = undefined;
+            pendingPath = undefined;
+          }
+        }
+      }
+    }
+  }
+  return index;
+}
+
+function recordRoute(index: UrlIndex, verb: string, path: string, file: string) {
+  const key = `${verb} ${path}`;
+  if (!index.exact.has(key)) index.exact.set(key, file);
+  if (path.includes('{') || path.includes(':')) {
+    index.patterns.push({ re: urlPatternToRegex(path), file });
+  }
+}
+
 function buildJavaFileIndex(projectPath: string, roots: string[]): Map<string, string> {
   const idx = new Map<string, string>();
   for (const rel of roots) {
@@ -197,6 +320,39 @@ function parseMigrationHistory(projectPath: string, fileRel: string): Map<string
   return m;
 }
 
+export function resolveJavaPathsForEndpoint(
+  projectPath: string,
+  ep: { method: string; path: string; controller?: string; tag?: string; docFile?: string }
+): { legacyJavaPath?: string; newJavaPath?: string } {
+  const legacyIndex = buildJavaFileIndex(projectPath, LEGACY_JAVA_ROOTS);
+  const newIndex = buildJavaFileIndex(projectPath, NEW_JAVA_ROOTS);
+  const legacyUrlIndex = buildUrlIndex(projectPath, LEGACY_JAVA_ROOTS);
+  const newUrlIndex = buildUrlIndex(projectPath, NEW_JAVA_ROOTS);
+
+  const tag = ep.tag || ep.controller || '';
+  const base = tag.replace(/Controller$/, '');
+  const docName = ep.docFile?.replace(/\.md$/i, '');
+  const lookup = (idx: Map<string, string>, names: (string | undefined)[]) => {
+    for (const n of names) if (n) { const h = idx.get(n); if (h) return h; }
+    return undefined;
+  };
+  const lookupUrl = (idx: UrlIndex) => {
+    const direct = idx.exact.get(`${ep.method} ${ep.path}`);
+    if (direct) return direct;
+    for (const { re, file } of idx.patterns) if (re.test(`${ep.method} ${ep.path}`)) return file;
+    return undefined;
+  };
+
+  const legacyJavaPath =
+    lookup(legacyIndex, [docName, `${base}Service.java`, `${base}.java`, `${tag}.java`]) ||
+    lookupUrl(legacyUrlIndex);
+  const newJavaPath =
+    lookup(newIndex, [`${tag}.java`, `${base}Controller.java`, `${base}.java`]) ||
+    lookupUrl(newUrlIndex);
+
+  return { legacyJavaPath, newJavaPath };
+}
+
 export interface DiscoveryResult {
   endpoints: Endpoint[];
   warnings: string[];
@@ -207,6 +363,8 @@ export interface DiscoveryResult {
     annotatedByHistory: number;
     stubbed: number;
     pending: number;
+    withLegacyJava: number;
+    withNewJava: number;
   };
 }
 
@@ -231,19 +389,47 @@ export function discoverEndpoints(projectPath: string, config: MigrationConfig, 
 
   const legacyIndex = buildJavaFileIndex(projectPath, LEGACY_JAVA_ROOTS);
   const newIndex = buildJavaFileIndex(projectPath, NEW_JAVA_ROOTS);
-  const resolveLegacy = (anno?: DocAnnotation): string | undefined => {
-    if (anno?.legacyJavaPath) return anno.legacyJavaPath;
-    const docFile = anno?.file;
-    if (docFile) {
-      const javaName = docFile.replace(/\.md$/i, '');
-      const hit = legacyIndex.get(javaName);
-      if (hit) return hit;
+  const legacyUrlIndex = buildUrlIndex(projectPath, LEGACY_JAVA_ROOTS);
+  const newUrlIndex = buildUrlIndex(projectPath, NEW_JAVA_ROOTS);
+
+  const tryNames = (idx: Map<string, string>, names: string[]): string | undefined => {
+    for (const n of names) { const h = idx.get(n); if (h) return h; }
+    return undefined;
+  };
+  const tryUrl = (idx: UrlIndex, method: string, path: string): string | undefined => {
+    const direct = idx.exact.get(`${method} ${path}`);
+    if (direct) return direct;
+    for (const { re, file } of idx.patterns) {
+      if (re.test(`${method} ${path}`)) return file;
     }
     return undefined;
   };
-  const resolveNew = (anno: DocAnnotation | undefined, tag: string): string | undefined => {
+
+  const resolveLegacy = (anno: DocAnnotation | undefined, tag: string, method: string, path: string): string | undefined => {
+    if (anno?.legacyJavaPath) return anno.legacyJavaPath;
+    const docName = anno?.file?.replace(/\.md$/i, '');
+    const base = tag.replace(/Controller$/, '');
+    const guesses = [
+      docName,
+      `${base}Service.java`,
+      `${base}.java`,
+      `${tag}.java`,
+    ].filter(Boolean) as string[];
+    const byName = tryNames(legacyIndex, guesses);
+    if (byName) return byName;
+    return tryUrl(legacyUrlIndex, method, path);
+  };
+  const resolveNew = (anno: DocAnnotation | undefined, tag: string, method: string, path: string): string | undefined => {
     if (anno?.newJavaPath) return anno.newJavaPath;
-    return newIndex.get(`${tag}.java`);
+    const base = tag.replace(/Controller$/, '');
+    const guesses = [
+      `${tag}.java`,
+      `${base}Controller.java`,
+      `${base}.java`,
+    ];
+    const byName = tryNames(newIndex, guesses);
+    if (byName) return byName;
+    return tryUrl(newUrlIndex, method, path);
   };
 
   const prefixAnnos: { prefix: string; anno: DocAnnotation }[] = [];
@@ -258,6 +444,8 @@ export function discoverEndpoints(projectPath: string, config: MigrationConfig, 
   let annotatedByHistory = 0;
   let stubbed = 0;
   let pending = 0;
+  let withLegacyJava = 0;
+  let withNewJava = 0;
 
   for (const op of openApi.operations) {
     const key = `${op.method} ${op.path}`;
@@ -309,6 +497,11 @@ export function discoverEndpoints(projectPath: string, config: MigrationConfig, 
 
     const responseSchema = getResponseSchema(op, openApi);
 
+    const legacyJavaPath = resolveLegacy(resolvedAnno, tag, op.method, op.path);
+    const newJavaPath = resolveNew(resolvedAnno, tag, op.method, op.path);
+    if (legacyJavaPath) withLegacyJava++;
+    if (newJavaPath) withNewJava++;
+
     endpoints.push({
       id: endpointId(op.method, op.path),
       controller: tag,
@@ -325,8 +518,8 @@ export function discoverEndpoints(projectPath: string, config: MigrationConfig, 
       tag,
       summary: op.summary,
       hasResponseSchema: !!responseSchema,
-      legacyJavaPath: resolveLegacy(resolvedAnno),
-      newJavaPath: resolveNew(resolvedAnno, tag),
+      legacyJavaPath,
+      newJavaPath,
     });
   }
 
@@ -341,6 +534,7 @@ export function discoverEndpoints(projectPath: string, config: MigrationConfig, 
     stats: {
       fromOpenApi: openApi.operations.length,
       annotatedByDoc, annotatedByHistory, stubbed, pending,
+      withLegacyJava, withNewJava,
     },
   };
 }
@@ -357,6 +551,8 @@ function legacyDocDiscovery(projectPath: string, config: MigrationConfig): Disco
 
   const legacyIndex = buildJavaFileIndex(projectPath, LEGACY_JAVA_ROOTS);
   const newIndex = buildJavaFileIndex(projectPath, NEW_JAVA_ROOTS);
+  const legacyUrlIndex = buildUrlIndex(projectPath, LEGACY_JAVA_ROOTS);
+  const newUrlIndex = buildUrlIndex(projectPath, NEW_JAVA_ROOTS);
 
   for (const [key, anno] of docAnno.byKey) {
     if (key.startsWith('__PREFIX__ ')) continue;
@@ -367,8 +563,27 @@ function legacyDocDiscovery(projectPath: string, config: MigrationConfig): Disco
     const isStubbed = anno.kind === 'stubbed' || anno.kind === 'parity-only';
     if (isStubbed) stubbed++;
     const javaName = anno.file.replace(/\.md$/i, '');
-    const legacyJavaPath = anno.legacyJavaPath || legacyIndex.get(javaName);
-    const newJavaPath = anno.newJavaPath || newIndex.get(`${anno.controller}.java`);
+    const ctrl = anno.controller;
+    const base = ctrl.replace(/Controller$/, '');
+    const legacyJavaPath = anno.legacyJavaPath
+      || legacyIndex.get(javaName)
+      || legacyIndex.get(`${base}Service.java`)
+      || legacyIndex.get(`${ctrl}.java`)
+      || ((): string | undefined => {
+           const direct = legacyUrlIndex.exact.get(`${method} ${path}`);
+           if (direct) return direct;
+           for (const { re, file } of legacyUrlIndex.patterns) if (re.test(`${method} ${path}`)) return file;
+           return undefined;
+         })();
+    const newJavaPath = anno.newJavaPath
+      || newIndex.get(`${ctrl}.java`)
+      || newIndex.get(`${base}Controller.java`)
+      || ((): string | undefined => {
+           const direct = newUrlIndex.exact.get(`${method} ${path}`);
+           if (direct) return direct;
+           for (const { re, file } of newUrlIndex.patterns) if (re.test(`${method} ${path}`)) return file;
+           return undefined;
+         })();
     all.push({
       id, controller: anno.controller, file: anno.file, docFile: anno.file,
       method: method as HttpMethod, path,
@@ -380,8 +595,13 @@ function legacyDocDiscovery(projectPath: string, config: MigrationConfig): Disco
   }
   if (all.length > 0) sources.push({ file: config.endpointSource.primary, count: all.length });
 
+  const withLegacyJava = all.filter(e => !!e.legacyJavaPath).length;
+  const withNewJava = all.filter(e => !!e.newJavaPath).length;
   return {
     endpoints: all, warnings, sources,
-    stats: { fromOpenApi: 0, annotatedByDoc: all.length, annotatedByHistory: 0, stubbed, pending: 0 },
+    stats: {
+      fromOpenApi: 0, annotatedByDoc: all.length, annotatedByHistory: 0, stubbed, pending: 0,
+      withLegacyJava, withNewJava,
+    },
   };
 }

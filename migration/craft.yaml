@@ -3,7 +3,7 @@ displayName: 🚚 Migration
 description: API parity testing during legacy → new module migration.
   OpenAPI-driven discovery, batch run, schema-shape diff, AI-fix dispatch,
   deviation flags.
-version: 0.2.0
+version: 0.3.0
 author: aion0
 tags:
   - migration

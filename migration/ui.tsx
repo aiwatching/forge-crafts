@@ -91,7 +91,7 @@ export default function MigrationCockpit() {
   const { projectPath, projectName } = useProject();
   const [config, setConfig] = useState<MigrationConfig | null>(null);
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
-  const [discoverInfo, setDiscoverInfo] = useState<{ warnings: string[]; sources: { file: string; count: number }[] } | null>(null);
+  const [discoverInfo, setDiscoverInfo] = useState<{ warnings: string[]; sources: { file: string; count: number }[]; stats?: any } | null>(null);
   const [results, setResults] = useState<Record<string, RunResult>>({});
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; running: boolean } | null>(null);
   const [failures, setFailures] = useState<FailureCluster[]>([]);
@@ -181,11 +181,40 @@ export default function MigrationCockpit() {
       });
       const d = await res.json();
       setEndpoints(d.endpoints || []);
-      setDiscoverInfo({ warnings: d.warnings || [], sources: d.sources || [] });
-      flash(`Discovered ${d.total || 0} endpoints`);
+      setDiscoverInfo({ warnings: d.warnings || [], sources: d.sources || [], stats: d.stats });
+      const lj = d.stats?.withLegacyJava ?? 0;
+      const nj = d.stats?.withNewJava ?? 0;
+      flash(`Discovered ${d.total || 0} endpoints · legacy ${lj} · new ${nj}`);
     } finally {
       setBusy(false);
     }
+  }, [projectPath, flash]);
+
+  const resolveJavaOne = useCallback(async (ep: Endpoint) => {
+    const res = await fetch(`/api/crafts/migration/resolve-java?projectPath=${encodeURIComponent(projectPath)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectPath, endpointId: ep.id }),
+    });
+    const r = await res.json();
+    if (!r.ok) { flash('Resolve failed'); return; }
+    setEndpoints(prev => prev.map(e => e.id === ep.id ? { ...e, legacyJavaPath: r.legacyJavaPath, newJavaPath: r.newJavaPath } : e));
+    flash(`legacy ${r.legacyJavaPath ? '✓' : '—'} · new ${r.newJavaPath ? '✓' : '—'}`);
+  }, [projectPath, flash]);
+
+  const resolveJavaAll = useCallback(async () => {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/crafts/migration/resolve-java-all?projectPath=${encodeURIComponent(projectPath)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPath }),
+      });
+      const r = await res.json();
+      if (!r.ok) { flash('Re-scan failed'); return; }
+      const dRes = await fetch(`/api/crafts/migration/discover?projectPath=${encodeURIComponent(projectPath)}`);
+      const d = await dRes.json();
+      setEndpoints(d.endpoints || []);
+      flash(`Scanned ${r.total} · legacy ${r.withLegacyJava} · new ${r.withNewJava}`);
+    } finally { setBusy(false); }
   }, [projectPath, flash]);
 
   const refreshFailures = useCallback(async () => {
@@ -444,6 +473,11 @@ export default function MigrationCockpit() {
           className="text-xs px-2.5 py-1 rounded bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 disabled:opacity-50">
           {busy ? 'Discovering…' : 'Discover from docs'}
         </button>
+        <button onClick={resolveJavaAll} disabled={busy || endpoints.length === 0}
+          className="text-xs px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-50"
+          title="Re-scan legacy + new Java sources, fill in legacy/new path for every row">
+          🔍 Re-scan Java
+        </button>
         <button onClick={() => runBatch()} disabled={!!batchProgress?.running || endpoints.length === 0}
           className="text-xs px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-50">
           Run all ({endpoints.length})
@@ -524,6 +558,13 @@ export default function MigrationCockpit() {
         {stats.flagged > 0 && <span className="text-yellow-400">🏷 {stats.flagged} flagged</span>}
         <span className="text-gray-500">({stats.stubbed} stub · {stats.pending} pending · {stats.withSchema} w/ schema)</span>
         <span className="text-purple-400">mode: {config.diffMode || 'shape'}</span>
+        {discoverInfo?.stats && (
+          <span className="text-[var(--text-secondary)]"
+            title="Endpoints with legacy / new Java class resolved (via doc Source/Target line, classname index, or @RequestMapping URL match)">
+            ☕ legacy <b className={discoverInfo.stats.withLegacyJava === stats.total ? 'text-emerald-400' : 'text-amber-400'}>{discoverInfo.stats.withLegacyJava}</b>
+            {' · '}new <b className={discoverInfo.stats.withNewJava === stats.total ? 'text-emerald-400' : 'text-cyan-400'}>{discoverInfo.stats.withNewJava}</b>
+          </span>
+        )}
         {batchProgress && (
           <span className={batchProgress.running ? 'text-yellow-400' : 'text-emerald-400'}>
             {batchProgress.running ? '⏳' : '✓'} {batchProgress.done}/{batchProgress.total}
@@ -660,16 +701,24 @@ export default function MigrationCockpit() {
                         {r.errorMessage}
                       </div>
                     )}
-                    {(ep.legacyJavaPath || ep.newJavaPath) && (
-                      <div className="px-12 pb-1 text-[9px] font-mono text-[var(--text-secondary)] flex gap-3 truncate">
-                        {ep.legacyJavaPath && (
-                          <JavaPathLink label="legacy" relPath={ep.legacyJavaPath} projectPath={projectPath} flash={flash} />
-                        )}
-                        {ep.newJavaPath && (
-                          <JavaPathLink label="new" relPath={ep.newJavaPath} projectPath={projectPath} flash={flash} />
-                        )}
-                      </div>
-                    )}
+                    <div className="px-12 pb-1.5 text-[10px] font-mono flex gap-4 items-center">
+                      {ep.legacyJavaPath ? (
+                        <JavaPathLink label="legacy" relPath={ep.legacyJavaPath} projectPath={projectPath} flash={flash} />
+                      ) : (
+                        <button onClick={() => resolveJavaOne(ep)}
+                          className="text-amber-300/60 italic hover:text-amber-300 hover:underline">
+                          legacy: 🔍 search
+                        </button>
+                      )}
+                      {ep.newJavaPath ? (
+                        <JavaPathLink label="new" relPath={ep.newJavaPath} projectPath={projectPath} flash={flash} />
+                      ) : (
+                        <button onClick={() => resolveJavaOne(ep)}
+                          className="text-cyan-300/60 italic hover:text-cyan-300 hover:underline">
+                          new: 🔍 search
+                        </button>
+                      )}
+                    </div>
                     {/* Flag indicator note */}
                     {!exp && ann?.note && (
                       <div className="px-12 pb-1 text-[10px] text-yellow-300/80 italic truncate" title={ann.note}>
@@ -1158,10 +1207,10 @@ function JavaPathLink({ label, relPath, projectPath, flash }: {
           flash(`Copied ${label} path`);
         } catch {}
       }}
-      title={absPath}
-      className={`${label === 'legacy' ? 'text-amber-300/70' : 'text-cyan-300/70'} hover:underline truncate`}
+      title={`${absPath}\n(click: copy path + open in VS Code if installed)`}
+      className={`${label === 'legacy' ? 'text-amber-300' : 'text-cyan-300'} hover:underline truncate`}
     >
-      {label}: {fileName}
+      <span className="opacity-60">{label}:</span> {fileName}
     </a>
   );
 }

@@ -7,7 +7,7 @@ import { execSync } from 'node:child_process';
 import { defineCraftServer } from '@forge/craft/server';
 import type { Annotation, Endpoint, Failure, FailureCluster, MigrationConfig, RunResult } from './_types';
 import { DEFAULT_CONFIG } from './_types';
-import { discoverEndpoints } from './_discoverer';
+import { discoverEndpoints, resolveJavaPathsForEndpoint } from './_discoverer';
 import { runEndpoint, runEndpoints } from './_runner';
 import { buildOpenApiDoc, type OpenApiDoc } from './_openapi';
 import { makeContext, renderDiagnosisMarkdown, renderBatchDiagnosis } from './_diagnose';
@@ -118,9 +118,51 @@ export default defineCraftServer({
     },
 
     // Discovery (cached + on-demand)
-    'GET /discover': async ({ forge }) => {
-      return { endpoints: loadEndpoints(forge) };
+    'GET /discover': async ({ projectPath, forge }) => {
+      const cached = loadEndpoints(forge);
+      const stale = cached.length > 0 && !cached.some(e => e.legacyJavaPath || e.newJavaPath);
+      if (!stale) return { endpoints: cached };
+      const config = loadConfig(forge);
+      const raw = config.endpointSource.openApiSpec ? forge.openapi(config.endpointSource.openApiSpec) : null;
+      const result = discoverEndpoints(projectPath, config, raw);
+      forge.storage.write('endpoints.json', result.endpoints);
+      return { endpoints: result.endpoints };
     },
+    // Re-resolve legacy/new Java paths for one endpoint (per-row 🔍 button).
+    'POST /resolve-java': async ({ projectPath, body, forge }) => {
+      const endpoints = loadEndpoints(forge);
+      const ep = endpoints.find(e => e.id === body.endpointId);
+      if (!ep) return { ok: false, error: 'endpoint not found' };
+      const { legacyJavaPath, newJavaPath } = resolveJavaPathsForEndpoint(projectPath, ep);
+      ep.legacyJavaPath = legacyJavaPath;
+      ep.newJavaPath = newJavaPath;
+      forge.storage.write('endpoints.json', endpoints);
+      return { ok: true, legacyJavaPath, newJavaPath };
+    },
+
+    // Re-resolve Java paths for ALL endpoints in a single pass (one index build).
+    'POST /resolve-java-all': async ({ projectPath, forge }) => {
+      const endpoints = loadEndpoints(forge);
+      let lj = 0, nj = 0;
+      // Build indexes once by calling per-endpoint resolver — but that rebuilds N times.
+      // Cheap path: call discoverEndpoints fresh, merge legacyJavaPath/newJavaPath by id.
+      const config = loadConfig(forge);
+      const raw = config.endpointSource.openApiSpec ? forge.openapi(config.endpointSource.openApiSpec) : null;
+      const fresh = discoverEndpoints(projectPath, config, raw);
+      const byId = new Map(fresh.endpoints.map(e => [e.id, e]));
+      for (const ep of endpoints) {
+        const f = byId.get(ep.id);
+        if (f) {
+          ep.legacyJavaPath = f.legacyJavaPath;
+          ep.newJavaPath = f.newJavaPath;
+          if (ep.legacyJavaPath) lj++;
+          if (ep.newJavaPath) nj++;
+        }
+      }
+      forge.storage.write('endpoints.json', endpoints);
+      return { ok: true, total: endpoints.length, withLegacyJava: lj, withNewJava: nj };
+    },
+
     'POST /discover': async ({ projectPath, forge }) => {
       const config = loadConfig(forge);
       const raw = config.endpointSource.openApiSpec ? forge.openapi(config.endpointSource.openApiSpec) : null;

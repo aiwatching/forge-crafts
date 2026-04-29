@@ -14,6 +14,7 @@ interface Endpoint {
   status: EndpointStatus; expectedHttpStatus: number; isStubbed: boolean; source: string;
   notes?: string; acceptance?: string[]; operationId?: string; tag?: string; summary?: string;
   hasResponseSchema?: boolean; docFile?: string;
+  legacyJavaPath?: string; newJavaPath?: string;
 }
 interface SideResult {
   url: string; method?: HttpMethod; status: number; statusText?: string; ok: boolean;
@@ -95,6 +96,7 @@ export default function MigrationCockpit() {
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; running: boolean } | null>(null);
   const [failures, setFailures] = useState<FailureCluster[]>([]);
   const [filter, setFilter] = useState<'all' | 'fail' | 'pass' | 'untested' | 'stubbed' | 'pending' | 'migrated' | 'flagged'>('all');
+  const [sort, setSort] = useState<'default' | 'path-asc' | 'path-desc'>('default');
   const [annotations, setAnnotations] = useState<Record<string, Annotation>>({});
   const [flagPopover, setFlagPopover] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -195,7 +197,7 @@ export default function MigrationCockpit() {
   // ─── Filtering ─────────────────────────────────────────
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return endpoints.filter(e => {
+    const list = endpoints.filter(e => {
       if (q && !`${e.method} ${e.path} ${e.controller}`.toLowerCase().includes(q)) return false;
       const r = results[e.id];
       switch (filter) {
@@ -209,7 +211,14 @@ export default function MigrationCockpit() {
         case 'flagged': return !!annotations[e.id];
       }
     });
-  }, [endpoints, results, filter, search]);
+    if (sort === 'default') return list;
+    const dir = sort === 'path-asc' ? 1 : -1;
+    return [...list].sort((a, b) => {
+      const c = a.path.localeCompare(b.path);
+      if (c !== 0) return c * dir;
+      return a.method.localeCompare(b.method) * dir;
+    });
+  }, [endpoints, results, filter, search, sort, annotations]);
 
   // ─── Run ───────────────────────────────────────────────
   const runOne = useCallback(async (ep: Endpoint) => {
@@ -474,6 +483,13 @@ export default function MigrationCockpit() {
           <option value="pending">Pending (no doc)</option>
           <option value="flagged">Flagged</option>
         </select>
+        <select value={sort} onChange={e => setSort(e.target.value as any)}
+          className="text-xs bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1"
+          title="Sort endpoint list">
+          <option value="default">Sort: discovery</option>
+          <option value="path-asc">Sort: URL ↑</option>
+          <option value="path-desc">Sort: URL ↓</option>
+        </select>
         {/* Bound terminal picker */}
         <div className="flex items-center gap-1 text-[10px]">
           <span className="text-[var(--text-secondary)]">→</span>
@@ -642,6 +658,16 @@ export default function MigrationCockpit() {
                     {!exp && r && (r.match === 'fail' || r.match === 'error') && r.errorMessage && (
                       <div className="px-12 pb-1 text-[10px] text-red-300/80 font-mono truncate" title={r.errorMessage}>
                         {r.errorMessage}
+                      </div>
+                    )}
+                    {(ep.legacyJavaPath || ep.newJavaPath) && (
+                      <div className="px-12 pb-1 text-[9px] font-mono text-[var(--text-secondary)] flex gap-3 truncate">
+                        {ep.legacyJavaPath && (
+                          <JavaPathLink label="legacy" relPath={ep.legacyJavaPath} projectPath={projectPath} flash={flash} />
+                        )}
+                        {ep.newJavaPath && (
+                          <JavaPathLink label="new" relPath={ep.newJavaPath} projectPath={projectPath} flash={flash} />
+                        )}
                       </div>
                     )}
                     {/* Flag indicator note */}
@@ -1115,6 +1141,28 @@ function FlagPopover({ endpoint, existing, suggestedPaths, onSave, onDelete, onC
         </button>
       </div>
     </div>
+  );
+}
+
+function JavaPathLink({ label, relPath, projectPath, flash }: {
+  label: string; relPath: string; projectPath: string; flash: (m: string) => void;
+}) {
+  const absPath = relPath.startsWith('/') ? relPath : `${projectPath.replace(/\/$/, '')}/${relPath}`;
+  const fileName = relPath.split('/').pop() || relPath;
+  return (
+    <a
+      href={`vscode://file/${absPath}`}
+      onClick={async (e) => {
+        try {
+          await navigator.clipboard.writeText(absPath);
+          flash(`Copied ${label} path`);
+        } catch {}
+      }}
+      title={absPath}
+      className={`${label === 'legacy' ? 'text-amber-300/70' : 'text-cyan-300/70'} hover:underline truncate`}
+    >
+      {label}: {fileName}
+    </a>
   );
 }
 

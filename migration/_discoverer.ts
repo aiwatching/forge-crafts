@@ -42,6 +42,39 @@ interface DocAnnotation {
   controller: string;
   file: string;
   notes?: string;
+  legacyJavaPath?: string;
+  newJavaPath?: string;
+}
+
+const SOURCE_LINE_RE = /^>\s*Source:\s*`([^`]+\.java)`/m;
+const TARGET_LINE_RE = /^>\s*Target:\s*`([^`]+\.java)`/m;
+
+const LEGACY_JAVA_ROOTS = ['masterloader/service/src/main/java'];
+const NEW_JAVA_ROOTS = ['fnac-access/web-server/src/main/java'];
+
+function buildJavaFileIndex(projectPath: string, roots: string[]): Map<string, string> {
+  const idx = new Map<string, string>();
+  for (const rel of roots) {
+    const root = join(projectPath, rel);
+    if (!existsSync(root) || !statSync(root).isDirectory()) continue;
+    const stack = [root];
+    while (stack.length) {
+      const dir = stack.pop()!;
+      let entries: string[] = [];
+      try { entries = readdirSync(dir); } catch { continue; }
+      for (const entry of entries) {
+        const full = join(dir, entry);
+        let st;
+        try { st = statSync(full); } catch { continue; }
+        if (st.isDirectory()) stack.push(full);
+        else if (entry.endsWith('.java')) {
+          const relPath = full.slice(projectPath.length + 1);
+          if (!idx.has(entry)) idx.set(entry, relPath);
+        }
+      }
+    }
+  }
+  return idx;
 }
 
 function parsePerControllerDocs(projectPath: string, dirRel: string): {
@@ -64,6 +97,11 @@ function parsePerControllerDocs(projectPath: string, dirRel: string): {
     const titleMatch = content.match(/^#\s+([A-Za-z0-9_$]+)(?:\.java)?\b/m);
     const controller = titleMatch?.[1] || f.replace(/\.java\.md$/i, '');
     const pathAnno = content.match(PATH_ANNOTATION_RE)?.[1];
+
+    const docLegacy = content.match(SOURCE_LINE_RE)?.[1];
+    const targetRaw = content.match(TARGET_LINE_RE)?.[1];
+    const docNew = targetRaw && !targetRaw.includes('...') ? targetRaw : undefined;
+    const baseAnno = { legacyJavaPath: docLegacy, newJavaPath: docNew };
 
     let currentKind: SectionKind = 'unknown';
     let inTable = false;
@@ -101,7 +139,7 @@ function parsePerControllerDocs(projectPath: string, dirRel: string): {
           if (expanded) {
             const key = `${m[1].toUpperCase()} ${expanded}`;
             const notes = cells.slice(1).join(' | ').replace(/`/g, '').trim() || undefined;
-            byKey.set(key, { kind: currentKind === 'unknown' ? 'migrated' : currentKind, controller, file: f, notes });
+            byKey.set(key, { kind: currentKind === 'unknown' ? 'migrated' : currentKind, controller, file: f, notes, ...baseAnno });
             count++;
           }
         }
@@ -114,7 +152,7 @@ function parsePerControllerDocs(projectPath: string, dirRel: string): {
           const expanded = expandPath(m[2].trim(), pathAnno);
           if (expanded) {
             const key = `${m[1].toUpperCase()} ${expanded}`;
-            byKey.set(key, { kind: currentKind === 'unknown' ? 'migrated' : currentKind, controller, file: f });
+            byKey.set(key, { kind: currentKind === 'unknown' ? 'migrated' : currentKind, controller, file: f, ...baseAnno });
             count++;
           }
         }
@@ -123,7 +161,7 @@ function parsePerControllerDocs(projectPath: string, dirRel: string): {
     }
 
     if (count === 0 && pathAnno) {
-      byKey.set(`__PREFIX__ ${pathAnno}`, { kind: 'parity-only', controller, file: f });
+      byKey.set(`__PREFIX__ ${pathAnno}`, { kind: 'parity-only', controller, file: f, ...baseAnno });
     }
   }
 
@@ -191,6 +229,23 @@ export function discoverEndpoints(projectPath: string, config: MigrationConfig, 
     ? parseMigrationHistory(projectPath, config.endpointSource.fallback)
     : new Map<string, HistoryAnnotation>();
 
+  const legacyIndex = buildJavaFileIndex(projectPath, LEGACY_JAVA_ROOTS);
+  const newIndex = buildJavaFileIndex(projectPath, NEW_JAVA_ROOTS);
+  const resolveLegacy = (anno?: DocAnnotation): string | undefined => {
+    if (anno?.legacyJavaPath) return anno.legacyJavaPath;
+    const docFile = anno?.file;
+    if (docFile) {
+      const javaName = docFile.replace(/\.md$/i, '');
+      const hit = legacyIndex.get(javaName);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+  const resolveNew = (anno: DocAnnotation | undefined, tag: string): string | undefined => {
+    if (anno?.newJavaPath) return anno.newJavaPath;
+    return newIndex.get(`${tag}.java`);
+  };
+
   const prefixAnnos: { prefix: string; anno: DocAnnotation }[] = [];
   for (const [key, anno] of docAnno.byKey) {
     if (key.startsWith('__PREFIX__ ')) {
@@ -211,17 +266,20 @@ export function discoverEndpoints(projectPath: string, config: MigrationConfig, 
     let docNotes: string | undefined;
     let docFile: string | undefined;
     let docKind: SectionKind | undefined;
+    let resolvedAnno: DocAnnotation | undefined;
 
     if (directAnno) {
       docKind = directAnno.kind;
       docFile = directAnno.file;
       docNotes = directAnno.notes;
+      resolvedAnno = directAnno;
       annotatedByDoc++;
     } else {
       for (const { prefix, anno } of prefixAnnos) {
         if (op.path === prefix || op.path.startsWith(prefix + '/') || op.path.startsWith(prefix + '?')) {
           docKind = anno.kind;
           docFile = anno.file;
+          resolvedAnno = anno;
           break;
         }
       }
@@ -267,6 +325,8 @@ export function discoverEndpoints(projectPath: string, config: MigrationConfig, 
       tag,
       summary: op.summary,
       hasResponseSchema: !!responseSchema,
+      legacyJavaPath: resolveLegacy(resolvedAnno),
+      newJavaPath: resolveNew(resolvedAnno, tag),
     });
   }
 
@@ -295,6 +355,9 @@ function legacyDocDiscovery(projectPath: string, config: MigrationConfig): Disco
   const docAnno = parsePerControllerDocs(projectPath, config.endpointSource.primary);
   warnings.push(...docAnno.warnings);
 
+  const legacyIndex = buildJavaFileIndex(projectPath, LEGACY_JAVA_ROOTS);
+  const newIndex = buildJavaFileIndex(projectPath, NEW_JAVA_ROOTS);
+
   for (const [key, anno] of docAnno.byKey) {
     if (key.startsWith('__PREFIX__ ')) continue;
     const [method, path] = key.split(' ');
@@ -303,12 +366,16 @@ function legacyDocDiscovery(projectPath: string, config: MigrationConfig): Disco
     seen.add(id);
     const isStubbed = anno.kind === 'stubbed' || anno.kind === 'parity-only';
     if (isStubbed) stubbed++;
+    const javaName = anno.file.replace(/\.md$/i, '');
+    const legacyJavaPath = anno.legacyJavaPath || legacyIndex.get(javaName);
+    const newJavaPath = anno.newJavaPath || newIndex.get(`${anno.controller}.java`);
     all.push({
       id, controller: anno.controller, file: anno.file, docFile: anno.file,
       method: method as HttpMethod, path,
       status: 'migrated',
       expectedHttpStatus: isStubbed ? 501 : 200,
       isStubbed, source: anno.file, notes: anno.notes,
+      legacyJavaPath, newJavaPath,
     });
   }
   if (all.length > 0) sources.push({ file: config.endpointSource.primary, count: all.length });
